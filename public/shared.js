@@ -193,5 +193,13 @@
     return problems;
   }
 
-  return { TYPES, uid, newQuestion, isBlank, isVisible, evaluate, needs, score, validate };
+  /** Is this checklist due on the given date? frequency: daily | days | none (on demand) */
+  function scheduledOn(c, date) {
+    const f = c.frequency || 'daily';
+    if (f === 'none') return false;
+    if (f === 'days') return (c.days || []).includes((date || new Date()).getDay());
+    return true;
+  }
+
+  return { TYPES, uid, scheduledOn, newQuestion, isBlank, isVisible, evaluate, needs, score, validate };
 });

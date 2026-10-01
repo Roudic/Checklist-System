@@ -1,6 +1,10 @@
 /* Kitchen Audit — single-page app (vanilla JS, hash router) */
-const { TYPES, evaluate, score, validate, isVisible, needs, newQuestion, uid } = Shared;
+const { TYPES, evaluate, score, validate, isVisible, needs, newQuestion, uid, scheduledOn } = Shared;
+let me = null; // logged-in user
+const isMgr = () => me && (me.role === 'manager' || me.role === 'admin');
 const $main = document.getElementById('main');
+// replaceChildren() doesn't flatten arrays or skip null/false, so pages render through this
+const mount = (...kids) => $main.replaceChildren(...kids.flat(9).filter((k) => k != null && k !== false));
 
 // ---------- helpers
 function h(tag, props, ...kids) {
@@ -18,6 +22,7 @@ function h(tag, props, ...kids) {
 const api = async (method, url, body) => {
   const r = await fetch('/api' + url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && !url.startsWith('/auth/')) { me = null; loginView(); throw new Error('Please log in'); }
   if (!r.ok) throw Object.assign(new Error(j.error || 'Request failed'), j);
   return j;
 };
@@ -29,11 +34,13 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const go = (hash) => { location.hash = hash; };
 
 function nav(active) {
-  const items = [['#/', '🏠', 'Dashboard'], ['#/checklists', '📋', 'Checklists'], ['#/audits', '🧾', 'Audits'], ['#/actions', '🛠️', 'Actions'], ['#/display', '📺', 'TV Display']];
+  const items = [['#/', '🏠', 'Dashboard'], ['#/checklists', '📋', 'Checklists', 1], ['#/audits', '🧾', 'Audits'], ['#/actions', '🛠️', 'Actions'], ['#/display', '📺', 'TV Display', 1], ['#/team', '👥', 'Team', 1]];
   const n = document.getElementById('nav');
+  n.classList.remove('hide');
   n.replaceChildren(h('h1', {}, '🍳 Kitchen Audit'),
-    ...items.map(([href, i, l]) => h('a', { href, class: href === active ? 'on' : '' }, i, l)),
-    h('div', { class: 'sp' }), h('a', { href: '/tv', target: '_blank' }, '🖥️', 'Open TV mode ↗'));
+    ...items.filter((x) => !x[3] || isMgr()).map(([href, i, l]) => h('a', { href, class: href === active ? 'on' : '' }, i, l)),
+    h('div', { class: 'sp' }),
+    h('div', { class: 'me' }, h('b', {}, me.name), h('span', {}, me.role), h('button', { class: 'sm ghost', onclick: logout }, 'Log out')));
 }
 
 // ---------- router
@@ -45,14 +52,18 @@ const routes = [
   [/^#\/audits$/, audits, '#/audits'],
   [/^#\/report\/(\w+)$/, report, '#/audits'],
   [/^#\/actions$/, actions, '#/actions'],
-  [/^#\/display$/, display, '#/display'],
+  [/^#\/display$/, display, '#/display', 1],
+  [/^#\/team$/, team, '#/team', 1],
 ];
+for (const r of routes) if (/checklists|builder/.test(r[2])) r[3] = 1;
 async function render() {
   const hash = location.hash || '#/';
-  for (const [re, fn, navKey] of routes) {
+  if (!me) return;
+  for (const [re, fn, navKey, mgr] of routes) {
     const m = re.exec(hash);
-    if (m) { nav(navKey); $main.replaceChildren(h('p', { class: 'empty' }, 'Loading…')); window.scrollTo(0, 0);
-      try { await fn(...m.slice(1)); } catch (e) { $main.replaceChildren(h('p', { class: 'empty' }, '⚠️ ' + e.message)); } return; }
+    if (m && mgr && !isMgr()) return go('#/');
+    if (m) { nav(navKey); mount(h('p', { class: 'empty' }, 'Loading…')); window.scrollTo(0, 0);
+      try { await fn(...m.slice(1)); } catch (e) { mount(h('p', { class: 'empty' }, '⚠️ ' + e.message)); } return; }
   }
   go('#/');
 }
@@ -66,30 +77,41 @@ async function dashboard() {
   const wk = done.filter((r) => new Date(r.submittedAt) > week);
   const avg = wk.length ? Math.round(wk.reduce((s, r) => s + r.percent, 0) / wk.length) : '–';
   const drafts = runs.filter((r) => r.status === 'draft');
-  $main.replaceChildren(
+  const today = new Date().toDateString();
+  const todayState = (c) => {
+    const d = done.find((r) => r.checklistId === c.id && new Date(r.submittedAt).toDateString() === today);
+    if (d) return h('span', { class: 'pill ' + scoreClass(d) }, (d.passed ? '✓ Done ' : '✕ Failed ') + Math.round(d.percent) + '%');
+    const p = drafts.find((r) => r.checklistId === c.id && new Date(r.startedAt).toDateString() === today);
+    if (p) return h('span', { class: 'pill info' }, `In progress ${p.progress}%`);
+    if (c.dueTime && scheduledOn(c) && new Date().toTimeString().slice(0, 5) > c.dueTime) return h('span', { class: 'pill fail' }, 'Overdue');
+    return h('span', { class: 'pill' }, c.category || 'General');
+  };
+  const card = (c) => h('div', { class: 'card' },
+      h('div', { class: 'row' }, h('b', {}, c.name), h('div', { class: 'sp' }), todayState(c)),
+      h('p', { class: 'tempr' }, `${c.questions.filter((q) => q.type !== 'section').length} items · pass ${c.passScore}%${c.dueTime ? ' · due ' + c.dueTime : ''}`),
+      h('button', { class: 'primary', onclick: () => startRun(c.id) }, '▶ Start audit'));
+  const dueToday = cl.filter((c) => scheduledOn(c)), other = cl.filter((c) => !scheduledOn(c));
+  mount(
     h('h2', {}, 'Dashboard'), h('p', { class: 'sub' }, new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })),
     h('div', { class: 'kpis' },
       kpi(wk.length, 'Audits this week'), kpi(avg + (avg === '–' ? '' : '%'), 'Avg score (7d)'),
       kpi(acts.length, 'Open actions'), kpi(drafts.length, 'In progress')),
-    h('div', { class: 'row', style: 'margin-bottom:10px' }, h('h3', { style: 'margin:0' }, 'Start a checklist'), h('div', { class: 'sp' }), h('a', { class: 'btn', href: '#/builder/new' }, '＋ New checklist')),
-    cl.length ? h('div', { class: 'grid' }, cl.map((c) => h('div', { class: 'card' },
-      h('div', { class: 'row' }, h('b', {}, c.name), h('div', { class: 'sp' }), h('span', { class: 'pill' }, c.category || 'General')),
-      h('p', { class: 'tempr' }, `${c.questions.filter((q) => q.type !== 'section').length} items · pass ${c.passScore}%${c.dueTime ? ' · due ' + c.dueTime : ''}`),
-      h('button', { class: 'primary', onclick: () => startRun(c.id) }, '▶ Start audit')))) : h('p', { class: 'empty' }, 'No checklists yet — create one!'),
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, h('h3', { style: 'margin:0' }, 'Due today'), h('div', { class: 'sp' }), isMgr() ? h('a', { class: 'btn', href: '#/builder/new' }, '＋ New checklist') : null),
+    dueToday.length ? h('div', { class: 'grid' }, dueToday.map(card)) : h('p', { class: 'empty card' }, cl.length ? 'Nothing scheduled today.' : 'No checklists yet.'),
+    other.length ? [h('h3', { style: 'margin:22px 0 10px' }, 'Other checklists'), h('div', { class: 'grid' }, other.map(card))] : null,
     h('h3', { style: 'margin:26px 0 10px' }, 'Recent audits'), auditTable(done.slice(0, 6)));
 }
 const kpi = (v, l) => h('div', { class: 'card kpi' }, h('b', {}, v), h('span', {}, l));
 
 async function startRun(checklistId) {
-  const auditor = localStorage.getItem('auditor') || '';
-  const run = await api('POST', '/runs', { checklistId, auditor });
+  const run = await api('POST', '/runs', { checklistId, location: localStorage.getItem('location') || '' });
   go('#/run/' + run.id);
 }
 
 // ---------- checklists list
 async function checklists() {
   const cl = await api('GET', '/checklists');
-  $main.replaceChildren(
+  mount(
     h('div', { class: 'row' }, h('div', {}, h('h2', {}, 'Checklists'), h('p', { class: 'sub' }, 'Build and manage your audit templates.')), h('div', { class: 'sp' }),
       h('a', { class: 'btn primary', href: '#/builder/new' }, '＋ New checklist')),
     cl.length ? h('div', { class: 'card' }, h('table', {}, h('tr', {}, ['Name', 'Category', 'Items', 'Pass', 'Due', ''].map((x) => h('th', {}, x))),
@@ -110,7 +132,7 @@ async function builder(id) {
   const draw = () => {
     const groups = {};
     Object.entries(TYPES).forEach(([k, t]) => (groups[t.group] = groups[t.group] || []).push([k, t]));
-    $main.replaceChildren(
+    mount(
       h('div', { class: 'row' }, h('a', { href: '#/checklists', class: 'btn ghost' }, '← Back'), h('div', { class: 'sp' }),
         h('button', { class: 'primary', onclick: save }, '💾 Save checklist')),
       h('div', { class: 'builder', style: 'margin-top:12px' },
@@ -118,7 +140,12 @@ async function builder(id) {
           h('div', { class: 'card', style: 'margin-bottom:14px' },
             h('label', { class: 'f' }, 'Checklist name'), h('input', { value: c.name, placeholder: 'e.g. Opening Kitchen Audit', oninput: (e) => { c.name = e.target.value; touch(); } }),
             h('label', { class: 'f' }, 'Description'), h('input', { value: c.description, oninput: (e) => { c.description = e.target.value; touch(); } }),
-            h('div', { class: 'three' },
+            h('label', { class: 'f' }, 'Schedule'),
+            h('div', { class: 'row' },
+              h('select', { style: 'width:auto', onchange: (e) => { c.frequency = e.target.value; c.days = c.days || []; touch(); draw(); } },
+                [['daily', 'Every day'], ['days', 'Specific days'], ['none', 'On demand (not scheduled)']].map(([v, l]) => h('option', { value: v, selected: (c.frequency || 'daily') === v }, l))),
+              c.frequency === 'days' ? h('div', { class: 'seg days' }, ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => h('button', { class: (c.days || []).includes(i) ? 'on y' : '', onclick: () => { const s = new Set(c.days || []); s.has(i) ? s.delete(i) : s.add(i); c.days = [...s].sort(); touch(); draw(); } }, d))) : null),
+          h('div', { class: 'three' },
               h('div', {}, h('label', { class: 'f' }, 'Category'), h('input', { value: c.category, oninput: (e) => { c.category = e.target.value; touch(); } })),
               h('div', {}, h('label', { class: 'f' }, 'Due time (TV board)'), h('input', { type: 'time', value: c.dueTime, oninput: (e) => { c.dueTime = e.target.value; touch(); } })),
               h('div', {}, h('label', { class: 'f' }, 'Pass score %'), h('input', { type: 'number', min: 0, max: 100, value: c.passScore, oninput: (e) => { c.passScore = Number(e.target.value); touch(); } })))),
@@ -203,7 +230,7 @@ async function runner(id) {
   const c = run.checklist, ans = run.answers;
   const A = (qid) => (ans[qid] = ans[qid] || {});
   let errs = new Set();
-  const persist = debounce(async () => { try { await api('PUT', '/runs/' + id, { answers: ans, auditor: run.auditor, location: run.location }); } catch (e) { toast('⚠️ ' + e.message); } }, 700);
+  const persist = debounce(async () => { try { await api('PUT', '/runs/' + id, { answers: ans, location: run.location }); } catch (e) { toast('⚠️ ' + e.message); } }, 700);
   const change = (redraw = true) => { persist(); updateProg(); if (redraw) drawQs(); };
   const prog = h('div', { class: 'bar' }, h('i', { style: 'width:0' })), progTxt = h('span', { class: 'tempr' });
   const qWrap = h('div', {});
@@ -264,19 +291,19 @@ async function runner(id) {
   const submitBtn = h('button', { class: 'primary', onclick: submit }, '✅ Submit audit');
   async function submit() {
     submitBtn.disabled = true;
-    try { await api('POST', `/runs/${id}/submit`, { answers: ans, auditor: run.auditor, location: run.location }); go('#/report/' + id); }
+    try { await api('POST', `/runs/${id}/submit`, { answers: ans, location: run.location }); go('#/report/' + id); }
     catch (e) {
       submitBtn.disabled = false;
       if (e.problems) { errs = new Set(e.problems.map((p) => p.qid)); drawQs(); toast(`${e.problems.length} item(s) need attention`); const el = document.getElementById('q-' + e.problems[0].qid); el && el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
       else toast('⚠️ ' + e.message);
     }
   }
-  $main.replaceChildren(
+  mount(
     h('div', { class: 'row' }, h('a', { href: '#/', class: 'btn ghost' }, '← Exit (auto-saved)'), h('div', { class: 'sp' }), h('span', { class: 'pill info' }, 'Draft')),
     h('h2', {}, c.name), c.description ? h('p', { class: 'sub' }, c.description) : null,
     h('div', { class: 'card', style: 'margin-bottom:14px' }, h('div', { class: 'two' },
-      h('div', {}, h('label', { class: 'f', style: 'margin-top:0' }, 'Auditor'), h('input', { value: run.auditor, placeholder: 'Your name', oninput: (e) => { run.auditor = e.target.value; localStorage.setItem('auditor', run.auditor); persist(); } })),
-      h('div', {}, h('label', { class: 'f', style: 'margin-top:0' }, 'Location / station'), h('input', { value: run.location, placeholder: 'e.g. Main kitchen', oninput: (e) => { run.location = e.target.value; persist(); } }))),
+      h('div', {}, h('label', { class: 'f', style: 'margin-top:0' }, 'Auditor'), h('div', { style: 'padding:9px 0;font-weight:600' }, run.auditor || me.name, run.updatedBy && run.updatedBy !== run.auditor ? h('span', { class: 'tempr' }, ` · last edit ${run.updatedBy}`) : null)),
+      h('div', {}, h('label', { class: 'f', style: 'margin-top:0' }, 'Location / station'), h('input', { value: run.location, placeholder: 'e.g. Main kitchen', oninput: (e) => { run.location = e.target.value; localStorage.setItem('location', run.location); persist(); } }))),
       h('div', { style: 'margin-top:12px' }, prog, progTxt)),
     qWrap, h('div', { class: 'sticky row' }, submitBtn, h('div', { class: 'sp' }), h('button', { class: 'danger', onclick: async () => { if (confirm('Discard this audit?')) { await api('DELETE', '/runs/' + id); go('#/'); } } }, 'Discard')));
 }
@@ -308,19 +335,19 @@ function auditTable(runs) {
 }
 async function audits() {
   const runs = (await api('GET', '/runs?status=submitted')), drafts = await api('GET', '/runs?status=draft');
-  $main.replaceChildren(h('h2', {}, 'Audits'), h('p', { class: 'sub' }, 'Every completed audit, newest first.'),
+  mount(h('h2', {}, 'Audits'), h('p', { class: 'sub' }, 'Every completed audit, newest first.'),
     drafts.length ? h('div', { class: 'card', style: 'margin-bottom:14px' }, h('b', {}, 'In progress'), drafts.map((d) => h('div', { class: 'row', style: 'padding:8px 0' }, d.checklistName, h('span', { class: 'tempr' }, `${d.progress}% · ${d.auditor || 'unknown'}`), h('div', { class: 'sp' }), h('a', { class: 'btn sm', href: '#/run/' + d.id }, 'Resume')))) : null,
     auditTable(runs));
 }
 async function report(id) {
   const run = await api('GET', '/runs/' + id), c = run.checklist, s = score(c, run.answers);
   const color = run.passed ? 'var(--ok)' : 'var(--bad)';
-  $main.replaceChildren(
+  mount(
     h('div', { class: 'row' }, h('a', { href: '#/audits', class: 'btn ghost' }, '← Audits'), h('div', { class: 'sp' }), h('button', { onclick: () => print() }, '🖨️ Print')),
     h('div', { class: 'card row', style: 'gap:24px;margin:12px 0 18px' },
       h('div', { class: 'ring', style: `--c:${color};--p:${run.percent}` }, h('i', {}, Math.round(run.percent) + '%')),
       h('div', {}, h('h2', {}, run.checklistName), h('span', { class: 'pill ' + scoreClass(run) }, run.passed ? 'PASSED' : 'FAILED'),
-        h('p', { class: 'tempr' }, `${run.auditor || 'Unknown'} · ${run.location || 'No location'} · ${fmtDate(run.submittedAt)}`),
+        h('p', { class: 'tempr' }, `${run.submittedBy || run.auditor || 'Unknown'} · ${run.location || 'No location'} · ${fmtDate(run.submittedAt)}`),
         h('p', { class: 'tempr' }, `${s.fails} failed item(s) · pass mark ${c.passScore}%` + (s.criticalFails.length ? ` · 🚨 ${s.criticalFails.length} critical failure(s)` : '')))),
     c.questions.map((q) => {
       if (q.type === 'section') return h('h3', { style: 'margin:20px 0 8px' }, q.label);
@@ -343,8 +370,9 @@ async function actions() {
     a.critical ? h('span', { class: 'pill fail' }, '🚨 CRITICAL') : h('span', { class: 'pill warn' }, 'Action'), h('b', {}, a.title), h('div', { class: 'sp' }),
     a.status === 'open' ? h('button', { class: 'sm primary', onclick: async () => { await api('PUT', '/actions/' + a.id, { status: 'done' }); actions(); } }, '✓ Mark fixed') : h('button', { class: 'sm', onclick: async () => { await api('PUT', '/actions/' + a.id, { status: 'open' }); actions(); } }, 'Reopen')),
     h('div', { class: 'tempr' }, `${a.checklistName}${a.location ? ' · ' + a.location : ''} · ${fmtDate(a.createdAt)}${a.note ? ' · ' + a.note : ''}`),
+    a.resolvedBy ? h('div', { class: 'tempr' }, `Fixed by ${a.resolvedBy} · ${fmtDate(a.resolvedAt)}`) : null,
     a.status === 'open' ? h('input', { placeholder: 'Resolution note (optional)', value: a.resolution || '', style: 'margin-top:8px', onchange: (e) => api('PUT', '/actions/' + a.id, { resolution: e.target.value }) }) : (a.resolution ? h('div', { class: 'tempr' }, '✅ ' + a.resolution) : null));
-  $main.replaceChildren(h('h2', {}, 'Corrective actions'), h('p', { class: 'sub' }, 'Every failed item on a submitted audit lands here until someone fixes it.'),
+  mount(h('h2', {}, 'Corrective actions'), h('p', { class: 'sub' }, 'Every failed item on a submitted audit lands here until someone fixes it.'),
     open.length ? open.map(row) : h('p', { class: 'empty card' }, '🎉 Nothing open. Kitchen is clean.'),
     done.length ? [h('h3', { style: 'margin:22px 0 8px' }, 'Resolved'), done.slice(0, 20).map(row)] : null);
 }
@@ -354,10 +382,16 @@ async function display() {
   const [b, cl] = await Promise.all([api('GET', '/board'), api('GET', '/checklists')]);
   b.announcements = b.announcements || []; b.liveChecklistIds = b.liveChecklistIds || [];
   const SL = { today: ['📋', "Today's checklists", 'Status of every checklist: done, in progress, due, overdue'], scores: ['🏆', 'Scores', 'Recent audit scores and 7-day average'], actions: ['🛠️', 'Open actions', 'Unresolved corrective actions'], live: ['📡', 'Live checklist', 'Item-by-item view of pinned checklists as staff complete them'], announce: ['📣', 'Announcements', 'Big-screen messages for the team'] };
-  const save = async () => { await api('PUT', '/board', b); toast('TV board saved ✓'); };
-  const draw = () => $main.replaceChildren(
+  const save = async () => { Object.assign(b, await api('PUT', '/board', b)); toast('TV board saved ✓'); };
+  const tvUrl = () => `${location.origin}/tv?key=${b.tvKey}`;
+  const draw = () => mount(
     h('div', { class: 'row' }, h('div', {}, h('h2', {}, 'TV Display'), h('p', { class: 'sub' }, 'Turn any TV or tablet into a live digital board. Open it full screen and it refreshes itself.')), h('div', { class: 'sp' }),
-      h('a', { class: 'btn', href: '/tv', target: '_blank' }, '🖥️ Open TV mode ↗'), h('button', { class: 'primary', onclick: save }, '💾 Save')),
+      h('a', { class: 'btn', href: tvUrl(), target: '_blank' }, '🖥️ Open TV mode ↗'), h('button', { class: 'primary', onclick: save }, '💾 Save')),
+    h('div', { class: 'card', style: 'margin-bottom:14px' }, h('b', {}, '🔗 TV link'),
+      h('p', { class: 'tempr', style: 'margin:4px 0 8px' }, 'Open this on the TV once. No login needed, so keep it private. Anyone with the link can view the board.'),
+      h('div', { class: 'row' }, h('input', { readonly: true, value: tvUrl(), style: 'flex:1;font-family:monospace;font-size:13px', onclick: (e) => e.target.select() }),
+        h('button', { class: 'sm', onclick: async () => { try { await navigator.clipboard.writeText(tvUrl()); toast('Link copied'); } catch { toast('Select the link and copy it'); } } }, '📋 Copy'),
+        h('button', { class: 'sm danger', onclick: async () => { if (!confirm('Make a new link? Every TV using the old one will stop until you open the new link on it.')) return; Object.assign(b, await api('POST', '/board/tvkey')); toast('New TV link created'); draw(); } }, '↻ New link'))),
     h('div', { class: 'card' }, h('div', { class: 'two' },
       h('div', {}, h('label', { class: 'f' }, 'Board title'), h('input', { value: b.title || '', oninput: (e) => (b.title = e.target.value) })),
       h('div', {}, h('label', { class: 'f' }, 'Seconds per slide'), h('input', { type: 'number', min: 4, value: b.rotateSeconds || 12, oninput: (e) => (b.rotateSeconds = Number(e.target.value) || 12) })))),
@@ -370,8 +404,98 @@ async function display() {
     h('div', { class: 'card' }, b.announcements.map((a, i) => h('div', { class: 'opt' }, h('select', { style: 'width:110px', onchange: (e) => (a.level = e.target.value) }, ['info', 'warn', 'alert'].map((l) => h('option', { selected: a.level === l }, l))),
       h('input', { value: a.text, oninput: (e) => (a.text = e.target.value) }), h('button', { class: 'sm', onclick: () => { b.announcements.splice(i, 1); draw(); } }, '✕'))),
       h('button', { class: 'sm', onclick: () => { b.announcements.push({ id: uid('a'), text: '', level: 'info' }); draw(); } }, '＋ Add announcement')),
-    h('p', { class: 'tempr', style: 'margin-top:14px' }, 'Tip: /tv?slides=today,scores shows only those slides on a specific screen. Arrow keys skip slides, Space pauses.'));
+    h('p', { class: 'tempr', style: 'margin-top:14px' }, 'Tip: add &slides=today,scores to the TV link to show only those slides on a specific screen. Arrow keys skip slides, Space pauses.'));
   draw();
 }
 
-render();
+// ---------- team
+async function team() {
+  const users = await api('GET', '/users');
+  const roleOpts = me.role === 'admin' ? ['staff', 'manager', 'admin'] : ['staff'];
+  const form = { name: '', role: 'staff', pin: '' };
+  const add = async () => {
+    try { await api('POST', '/users', form); toast(`${form.name} added`); team(); } catch (e) { toast('⚠️ ' + e.message); }
+  };
+  const pinPrompt = async (u) => {
+    const pin = prompt(`New PIN for ${u.name} (4-8 digits)`);
+    if (pin == null) return;
+    try { await api('PUT', '/users/' + u.id, { pin }); toast('PIN updated'); } catch (e) { toast('⚠️ ' + e.message); }
+  };
+  const can = (u) => u.id === me.id || me.role === 'admin' || (me.role === 'manager' && u.role === 'staff');
+  mount(
+    h('h2', {}, 'Team'), h('p', { class: 'sub' }, 'Everyone who can log in. Staff run audits and fix actions. Managers also build checklists, run the TV and add staff. Admins control everything.'),
+    h('div', { class: 'card', style: 'margin-bottom:16px' }, h('b', {}, 'Add a person'),
+      h('div', { class: 'three' },
+        h('div', {}, h('label', { class: 'f' }, 'Name'), h('input', { placeholder: 'e.g. Marcus', oninput: (e) => (form.name = e.target.value) })),
+        h('div', {}, h('label', { class: 'f' }, 'Role'), h('select', { onchange: (e) => (form.role = e.target.value) }, roleOpts.map((r) => h('option', { value: r }, r)))),
+        h('div', {}, h('label', { class: 'f' }, 'PIN (4-8 digits)'), h('input', { type: 'password', inputmode: 'numeric', maxlength: 8, oninput: (e) => (form.pin = e.target.value) }))),
+      h('button', { class: 'primary', style: 'margin-top:12px', onclick: add }, '＋ Add')),
+    h('div', { class: 'card' }, h('table', {}, h('tr', {}, ['Name', 'Role', 'Status', ''].map((x) => h('th', {}, x))),
+      users.map((u) => h('tr', {},
+        h('td', {}, h('b', {}, u.name), u.id === me.id ? h('span', { class: 'tempr' }, ' (you)') : null),
+        h('td', {}, me.role === 'admin' && u.id !== me.id
+          ? h('select', { style: 'width:auto', onchange: async (e) => { try { await api('PUT', '/users/' + u.id, { role: e.target.value }); toast('Role updated'); } catch (er) { toast('⚠️ ' + er.message); team(); } } }, ['staff', 'manager', 'admin'].map((r) => h('option', { selected: u.role === r }, r)))
+          : h('span', { class: 'pill' + (u.role === 'admin' ? ' fail' : u.role === 'manager' ? ' info' : '') }, u.role)),
+        h('td', {}, h('span', { class: 'pill ' + (u.active ? 'pass' : '') }, u.active ? 'Active' : 'Deactivated')),
+        h('td', { style: 'text-align:right;white-space:nowrap' }, can(u) ? [
+          h('button', { class: 'sm', onclick: () => pinPrompt(u) }, 'Reset PIN'), ' ',
+          u.id !== me.id ? h('button', { class: 'sm ' + (u.active ? 'danger' : ''), onclick: async () => { try { await api('PUT', '/users/' + u.id, { active: !u.active }); team(); } catch (e) { toast('⚠️ ' + e.message); } } }, u.active ? 'Deactivate' : 'Reactivate') : null] : null))))));
+}
+
+// ---------- auth screens
+function authShell(...kids) {
+  document.getElementById('nav').classList.add('hide');
+  mount(h('div', { class: 'auth' }, h('div', { class: 'logo' }, '🍳'), ...kids));
+}
+function pinPad(onDone, label = 'Enter PIN') {
+  let pin = '';
+  const dots = h('div', { class: 'dots' }), msg = h('div', { class: 'msg' });
+  const paint = () => dots.replaceChildren(...Array.from({ length: Math.max(4, pin.length) }, (_, i) => h('i', { class: i < pin.length ? 'on' : '' })));
+  const press = async (k) => {
+    msg.textContent = '';
+    if (k === '⌫') pin = pin.slice(0, -1);
+    else if (k === '✓') { if (pin.length < 4) { msg.textContent = 'At least 4 digits'; return; } const p = pin; pin = ''; paint(); const err = await onDone(p); if (err) msg.textContent = err; return; }
+    else if (pin.length < 8) pin += k;
+    paint();
+  };
+  const onKey = (e) => { if (!document.body.contains(dots)) return document.removeEventListener('keydown', onKey); if (/^\d$/.test(e.key)) press(e.key); else if (e.key === 'Backspace') press('⌫'); else if (e.key === 'Enter') press('✓'); };
+  document.addEventListener('keydown', onKey);
+  paint();
+  return h('div', {}, h('div', { class: 'tempr', style: 'text-align:center' }, label), dots, msg,
+    h('div', { class: 'pad' }, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', '✓'].map((k) => h('button', { class: k === '✓' ? 'primary' : '', onclick: () => press(k) }, k))));
+}
+async function loginView() {
+  const users = await api('GET', '/auth/users');
+  const pick = (u) => authShell(h('h2', {}, `Hey ${u.name} 👋`),
+    pinPad(async (pin) => { try { me = (await api('POST', '/auth/login', { userId: u.id, pin })).user; enter(); } catch (e) { return e.message; } }),
+    h('button', { class: 'ghost', style: 'margin:14px auto 0;display:flex', onclick: loginView }, '← Not you?'));
+  authShell(h('h2', {}, 'Who’s checking in?'), h('p', { class: 'sub' }, 'Tap your name'),
+    h('div', { class: 'people' }, users.map((u) => h('button', { onclick: () => pick(u) }, h('span', { class: 'av' }, u.name.slice(0, 1).toUpperCase()), u.name))));
+}
+function setupView() {
+  let name = '';
+  const step2 = () => {
+    if (!name.trim()) return toast('Enter your name');
+    let first = null;
+    const ask = () => authShell(h('h2', {}, first ? 'Confirm PIN' : 'Pick your PIN'), h('p', { class: 'sub' }, first ? 'Type it one more time' : '4 to 8 digits. You’ll use it to log in.'),
+      pinPad(async (pin) => {
+        if (!first) { first = pin; ask(); return; }
+        if (pin !== first) { first = null; ask(); toast('PINs didn’t match. Try again.'); return; }
+        try { me = (await api('POST', '/auth/setup', { name, pin })).user; toast('You’re the admin. Let’s go!'); enter(); } catch (e) { return e.message; }
+      }));
+    ask();
+  };
+  authShell(h('h2', {}, 'Welcome to Kitchen Audit'), h('p', { class: 'sub' }, 'First things first. Create the owner (admin) account.'),
+    h('input', { placeholder: 'Your name', style: 'font-size:18px', oninput: (e) => (name = e.target.value), onkeydown: (e) => e.key === 'Enter' && step2() }),
+    h('button', { class: 'primary', style: 'width:100%;justify-content:center;margin-top:12px;padding:13px', onclick: step2 }, 'Next →'));
+}
+async function logout() { await api('POST', '/auth/logout'); me = null; location.hash = '#/'; loginView(); }
+function enter() { render(); }
+
+(async function boot() {
+  const st = await api('GET', '/auth/status');
+  me = st.user;
+  if (st.needsSetup) return setupView();
+  if (!me) return loginView();
+  render();
+})();

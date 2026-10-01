@@ -1,5 +1,5 @@
 /* TV / digital board mode. Polls /api/tv, rotates slides, computes live status client-side. */
-const { evaluate } = Shared;
+const { scheduledOn } = Shared;
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -24,7 +24,7 @@ function status(c) {
 const slides = {
   today() {
     const s = el('div', 'slide'); s.append(el('h2', '', "Today's checklists"));
-    const list = data.checklists.filter((c) => c.frequency !== 'none');
+    const list = data.checklists.filter((c) => scheduledOn(c, new Date()));
     const sts = list.map((c) => [c, status(c)]);
     const count = (k) => sts.filter(([, x]) => x.k === k).length;
     s.append(el('div', 'summary', `<div><b style="color:var(--ok)">${count('done')}</b>done</div><div><b style="color:var(--info)">${count('prog')}</b>in progress</div><div><b style="color:var(--warn)">${count('due')}</b>upcoming</div><div><b style="color:var(--bad)">${count('over') + count('failed')}</b>need attention</div>`));
@@ -89,6 +89,7 @@ function activeSlides() {
 }
 
 function show(i, keepTimer) {
+  if (!data) return;
   const list = activeSlides(); if (!list.length) return;
   idx = ((i % list.length) + list.length) % list.length;
   let node = null, tries = 0;
@@ -100,7 +101,7 @@ function show(i, keepTimer) {
 
 function tick() {
   const secs = Math.max(4, Number(data && data.board.rotateSeconds) || 12), pct = ((Date.now() - slideStart) / (secs * 1000)) * 100;
-  $('progress').firstChild.style.width = (paused ? 0 : Math.min(100, pct)) + '%';
+  $('progress').firstChild.style.width = (paused || !data ? 0 : Math.min(100, pct)) + '%';
   const now = new Date();
   $('clock').innerHTML = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + `<small>${now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}</small>`;
   if (!paused && data && pct >= 100) { visit++; show(idx + 1); }
@@ -114,12 +115,19 @@ function ticker() {
 
 async function load() {
   try {
-    data = await (await fetch('/api/tv', { cache: 'no-store' })).json();
+    const r = await fetch('/api/tv' + (qs.get('key') ? '?key=' + encodeURIComponent(qs.get('key')) : ''), { cache: 'no-store' });
+    if (r.status === 401) return unpaired();
+    data = await r.json();
     $('title').textContent = data.board.title || 'Kitchen Board';
     ticker();
     // refresh visible slide in place so live progress updates without rotating
     if (current) show(idx, true); else show(0);
   } catch (e) { /* offline: keep showing last data */ }
+}
+
+function unpaired() {
+  data = null;
+  $('stage').replaceChildren(el('div', 'slide', `<div class="big"><div class="lv">📺 Screen not paired</div><p>Open the TV link on this screen</p><div style="color:var(--mute);font-size:1.2em">A manager can copy it from <b>TV Display → TV link</b> in the app.</div></div>`));
 }
 
 document.addEventListener('keydown', (e) => {
