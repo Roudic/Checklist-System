@@ -333,9 +333,12 @@ async function runner(id) {
     try { await api('PUT', '/runs/' + id, { answers: ans, location: run.location }); saveEl.replaceChildren(icon('check', 'sm'), 'Saved'); }
     catch (e) { saveEl.replaceChildren(icon('circle-alert', 'sm'), 'Not saved'); fail(e); }
   }, 700);
-  const change = (redraw = true) => {
+  const change = (redraw = true, q) => {
     const k = document.activeElement && document.activeElement.closest && document.activeElement.closest('.rq');
-    if (k) errs.delete(k.id.slice(2)); saveEl.replaceChildren(icon('circle-dashed', 'sm'), 'Unsaved'); persist(); updateProg(); if (redraw) drawQs(); };
+    if (k) errs.delete(k.id.slice(2));
+    if (q) errs.delete(q.id);
+    if (q && !redraw) refreshCard(q);
+    saveEl.replaceChildren(icon('circle-dashed', 'sm'), 'Unsaved'); persist(); updateProg(); if (redraw) drawQs(); };
   const progBar = bar(0), progTxt = h('span', { class: 'hint num' }), bottomTxt = h('div', { class: 'grow' });
   const qWrap = h('div', {});
   function updateProg() {
@@ -350,26 +353,36 @@ async function runner(id) {
     qWrap.replaceChildren(...c.questions.filter((q) => isVisible(q, c, ans)).map((q) => qView(q, q.type === 'section' ? 0 : ++n)));
     if (fid) { const el = qWrap.querySelector(`[data-k="${fid}"]`); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch {} } }
   }
+  function badge(q, n) {
+    const a = A(q.id), res = evaluate(q, a);
+    const st = a.na ? 'done' : { fail: 'fail', pass: 'done', info: 'done', partial: 'partial' }[res.status] || '';
+    return h('span', { class: 'rq-n ' + st, 'data-n': n }, st === 'fail' ? icon('x', 'sm') : st === 'done' ? icon('check', 'sm') : n);
+  }
+  // typing in a text box doesn't redraw (it would steal focus), so update the badge and error line in place
+  function refreshCard(q) {
+    const card = document.getElementById('q-' + q.id); if (!card) return;
+    const old = card.querySelector('.rq-n'); if (old) old.replaceWith(badge(q, old.dataset.n));
+    if (!errs.has(q.id)) { card.classList.remove('err'); const e = card.querySelector('.rq-err'); if (e) e.remove(); }
+  }
   function qView(q, n) {
     if (q.type === 'section') return h('div', { class: 'sec-h' }, h('h2', {}, q.label || 'Section'), q.help ? h('span', { class: 'hint' }, q.help) : null);
     const a = A(q.id), res = evaluate(q, a);
-    const answered = !Shared.isBlank(a.value) || a.na;
+    const answered = res.status !== 'blank' || a.na;
     const wantN = needs(q, res, 'note'), wantP = needs(q, res, 'photo');
-    const st = a.na ? 'done' : { fail: 'fail', pass: 'done', info: 'done', partial: 'partial' }[res.status] || '';
-    const num = h('span', { class: 'rq-n ' + st }, st === 'fail' ? icon('x', 'sm') : st === 'done' ? icon('check', 'sm') : n);
+    const num = badge(q, n);
     const card = h('div', { class: 'panel rq' + (errs.has(q.id) ? ' err' : ''), id: 'q-' + q.id },
       h('div', { class: 'rq-h' }, num, h('div', { class: 'grow' },
         h('div', { class: 'rq-l' }, q.label || TYPES[q.type].label, q.required ? h('span', { class: 'req' }, ' *') : null),
         q.help ? h('div', { class: 'rq-help' }, q.help) : null),
         q.critical ? chip('Critical', 'bad') : null),
-      errs.has(q.id) ? h('div', { class: 'row', style: 'color:var(--bad);font-weight:600;margin:-4px 0 12px' }, icon('circle-alert', 'sm'), errs.get(q.id)) : null,
+      errs.has(q.id) ? h('div', { class: 'row rq-err', style: 'color:var(--bad);font-weight:600;margin:-4px 0 12px' }, icon('circle-alert', 'sm'), errs.get(q.id)) : null,
       a.na ? chip('Not applicable', '', true) : input(q, a));
-    if (q.allowNA && !['yesno', 'passfail'].includes(q.type)) card.append(h('label', { class: 'switch', style: 'margin-top:12px' }, h('input', { type: 'checkbox', checked: !!a.na, onchange: (e) => { a.na = e.target.checked; change(); } }), 'Not applicable'));
+    if (q.allowNA && !['yesno', 'passfail'].includes(q.type)) card.append(h('label', { class: 'switch', style: 'margin-top:12px' }, h('input', { type: 'checkbox', checked: !!a.na, onchange: (e) => { a.na = e.target.checked; change(true, q); } }), 'Not applicable'));
     const showExtra = (answered && !a.na && q.type !== 'photo') || wantN || wantP;
     if (showExtra) {
       const extra = h('div', { class: 'rq-extra' });
-      if (res.status === 'fail') extra.append(h('div', { class: 'row', style: 'margin-bottom:12px;color:var(--bad);font-weight:600' }, icon('triangle-alert', 'sm'), q.critical ? 'Critical item failed. Explain what you did about it.' : 'Failed. Add a note on what you did about it.'));
-      extra.append(field('Note' + (wantN ? ' (required)' : ''), h('textarea', { 'data-k': 'n' + q.id, placeholder: wantN ? 'What happened, and what did you do about it?' : 'Optional note', value: a.note || '', oninput: (e) => { a.note = e.target.value; change(false); } })));
+      if (res.status === 'fail') extra.append(h('div', { class: 'row', style: 'margin-bottom:12px;color:var(--bad);font-weight:600' }, icon('triangle-alert', 'sm'), (q.critical ? 'Critical item failed. ' : 'Failed. ') + (wantN && wantP ? 'Add a note and a photo.' : wantN ? 'Add a note on what you did about it.' : wantP ? 'Add a photo of the issue.' : 'Add a note if it helps.')));
+      extra.append(field('Note' + (wantN ? ' (required)' : ''), h('textarea', { 'data-k': 'n' + q.id, placeholder: wantN ? 'What happened, and what did you do about it?' : 'Optional note', value: a.note || '', oninput: (e) => { a.note = e.target.value; change(false, q); } })));
       extra.append(h('div', { style: 'margin-top:12px' }, photoBox(q, a, wantP)));
       card.append(extra);
     }
@@ -377,12 +390,12 @@ async function runner(id) {
   }
   function photoBox(q, a, req) {
     return h('div', { class: 'photos' },
-      (a.photos || []).map((p, i) => h('div', { class: 'ph' }, h('img', { src: p, alt: 'Photo ' + (i + 1) }), iconBtn('x', 'Remove photo', () => { a.photos.splice(i, 1); change(); }, ''))),
+      (a.photos || []).map((p, i) => h('div', { class: 'ph' }, h('img', { src: p, alt: 'Photo ' + (i + 1) }), iconBtn('x', 'Remove photo', () => { a.photos.splice(i, 1); change(true, q); }, ''))),
       h('label', { class: 'upload' + (req && !(a.photos || []).length ? ' need' : '') }, icon('camera'), req && !(a.photos || []).length ? 'Photo required' : 'Add photo',
-        h('input', { type: 'file', accept: 'image/*', capture: 'environment', style: 'display:none', onchange: async (e) => { const f = e.target.files[0]; if (!f) return; (a.photos = a.photos || []).push(await shrink(f)); change(); } })));
+        h('input', { type: 'file', accept: 'image/*', capture: 'environment', style: 'display:none', onchange: async (e) => { const f = e.target.files[0]; if (!f) return; (a.photos = a.photos || []).push(await shrink(f)); e.target.value = ''; change(true, q); } })));
   }
   function input(q, a) {
-    const set = (v) => { a.value = v; change(); };
+    const set = (v) => { a.value = v; change(true, q); };
     switch (q.type) {
       case 'yesno': { const pass = q.passOn || 'yes';
         return h('div', { class: 'seg' }, ['yes', 'no'].map((v) => h('button', { class: (a.value === v ? 'on ' : '') + (pass === v ? 'ok' : 'bad'), onclick: () => set(v) }, icon(v === 'yes' ? 'check' : 'x', 'sm'), v === 'yes' ? 'Yes' : 'No'))); }
@@ -392,17 +405,17 @@ async function runner(id) {
       case 'multi': case 'tick': return h('div', {}, q.options.map((o) => { const on = (a.value || []).includes(o.label);
         return h('label', { class: 'opt-row' + (on ? ' on' : '') }, h('input', { type: 'checkbox', checked: on, onchange: (e) => { const s = new Set(a.value || []); e.target.checked ? s.add(o.label) : s.delete(o.label); set(q.options.map((x) => x.label).filter((l) => s.has(l))); } }), o.label); }));
       case 'number': case 'temperature': { const hasRange = q.min != null || q.max != null;
-        return h('div', {}, h('div', { class: 'temp-in' }, h('input', { type: 'number', step: 'any', inputmode: 'decimal', placeholder: '0', 'data-k': 'v' + q.id, value: a.value ?? '', oninput: (e) => { a.value = e.target.value === '' ? undefined : Number(e.target.value); change(true); } }), h('b', { style: 'font-size:18px;color:var(--mute)' }, q.unit || '')),
+        return h('div', {}, h('div', { class: 'temp-in' }, h('input', { type: 'number', step: 'any', inputmode: 'decimal', placeholder: '0', 'data-k': 'v' + q.id, value: a.value ?? '', oninput: (e) => { a.value = e.target.value === '' ? undefined : Number(e.target.value); change(true, q); } }), h('b', { style: 'font-size:18px;color:var(--mute)' }, q.unit || '')),
           hasRange ? h('div', { class: 'range-hint' }, icon(q.type === 'temperature' ? 'thermometer' : 'info', 'sm'), `Acceptable: ${q.min ?? '—'} to ${q.max ?? '—'} ${q.unit || ''}`) : null); }
       case 'slider': return h('div', { class: 'row', style: 'gap:16px' }, h('input', { type: 'range', class: 'grow', min: q.min, max: q.max, step: q.step || 1, value: a.value ?? q.min, oninput: (e) => { a.value = Number(e.target.value); e.target.nextSibling.textContent = a.value + (q.unit || ''); persist(); updateProg(); }, onchange: () => change() }), h('b', { class: 'num', style: 'min-width:60px;font-size:18px' }, a.value != null ? a.value + (q.unit || '') : '—'));
       case 'rating': return h('div', { class: 'stars' }, Array.from({ length: q.max || 5 }, (_, i) => h('button', { class: a.value > i ? 'on' : '', 'aria-label': `${i + 1} star${i ? 's' : ''}`, onclick: () => set(a.value === i + 1 ? undefined : i + 1) }, icon('star'))));
-      case 'text': return h('input', { 'data-k': 'v' + q.id, placeholder: 'Type your answer', value: a.value || '', oninput: (e) => { a.value = e.target.value; change(false); } });
-      case 'longtext': return h('textarea', { 'data-k': 'v' + q.id, placeholder: 'Type your answer', value: a.value || '', oninput: (e) => { a.value = e.target.value; change(false); } });
+      case 'text': return h('input', { 'data-k': 'v' + q.id, placeholder: 'Type your answer', value: a.value || '', oninput: (e) => { a.value = e.target.value; change(false, q); } });
+      case 'longtext': return h('textarea', { 'data-k': 'v' + q.id, placeholder: 'Type your answer', value: a.value || '', oninput: (e) => { a.value = e.target.value; change(false, q); } });
       case 'date': return h('input', { type: 'date', style: 'max-width:240px', value: a.value || '', onchange: (e) => set(e.target.value) });
       case 'time': return h('input', { type: 'time', style: 'max-width:240px', value: a.value || '', onchange: (e) => set(e.target.value) });
       case 'datetime': return h('input', { type: 'datetime-local', style: 'max-width:280px', value: a.value || '', onchange: (e) => set(e.target.value) });
       case 'photo': return photoBox(q, a, q.required);
-      case 'signature': return sigPad(a, () => change(false));
+      case 'signature': return sigPad(a, () => change(false, q));
     }
   }
   const submitBtn = btn('Submit audit', 'check', submit, 'primary');
@@ -503,7 +516,7 @@ async function report(id) {
     sections.filter((x) => x.items.length).map((sec) => panel(sec.title || 'Items', { cls: '', sub: `${sec.items.length} item${sec.items.length > 1 ? 's' : ''}` }, h('div', { class: 'list' }, sec.items.map(itemRow)))));
 }
 const PRETTY = { yes: 'Yes', no: 'No', pass: 'Pass', fail: 'Fail', na: 'N/A' };
-const displayVal = (q, a) => a.na ? 'Not applicable' : (q.type === 'yesno' || q.type === 'passfail') && PRETTY[a.value] ? PRETTY[a.value] : Array.isArray(a.value) ? (a.value.length ? a.value.join(', ') : '—') : a.value == null || a.value === '' ? '—' : String(a.value) + (['number', 'temperature', 'slider'].includes(q.type) ? ' ' + (q.unit || '') : q.type === 'rating' ? ` / ${q.max || 5}` : '');
+const displayVal = (q, a) => q.type === 'photo' ? ((a.photos || []).length ? `${a.photos.length} photo${a.photos.length > 1 ? 's' : ''}` : 'No photo') : a.na ? 'Not applicable' : (q.type === 'yesno' || q.type === 'passfail') && PRETTY[a.value] ? PRETTY[a.value] : Array.isArray(a.value) ? (a.value.length ? a.value.join(', ') : '—') : a.value == null || a.value === '' ? '—' : String(a.value) + (['number', 'temperature', 'slider'].includes(q.type) ? ' ' + (q.unit || '') : q.type === 'rating' ? ` / ${q.max || 5}` : '');
 
 // ---------- actions
 async function actions(tab = 'open') {

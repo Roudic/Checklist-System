@@ -44,4 +44,21 @@ t('note/photo required on fail', () => {
   assert.equal(S.validate(c, { [id]: { value: 'fail', note: 'x', photos: ['p'] } }).length, 0);
   assert.equal(S.validate(c, { [id]: { value: 'pass' } }).length, 0);
 });
+t('photo question counts as answered once a photo is attached', () => {
+  const pq = q('photo', { required: true });
+  const c = { passScore: 80, questions: [pq] };
+  assert.equal(S.evaluate(pq, {}).status, 'blank');
+  assert.equal(S.validate(c, {}).length, 1); // required, nothing uploaded
+  const withPhoto = { [pq.id]: { photos: ['data:image/jpeg;base64,AAAA'] } };
+  assert.notEqual(S.evaluate(pq, withPhoto[pq.id]).status, 'blank');
+  assert.deepEqual(S.validate(c, withPhoto), []); // can submit
+  assert.equal(S.score(c, withPhoto).progress, 100);
+  assert.equal(S.evaluate(pq, { photos: [] }).status, 'blank'); // removed again
+});
+t('"is answered" logic works for photo questions', () => {
+  const pq = q('photo', { required: false }), b = q('text', { showIf: { qid: pq.id, op: 'answered' } });
+  const c = { questions: [pq, b] };
+  assert.equal(S.isVisible(b, c, {}), false);
+  assert.equal(S.isVisible(b, c, { [pq.id]: { photos: ['x'] } }), true);
+});
 console.log(`\n${n} passed`);

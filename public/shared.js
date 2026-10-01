@@ -50,6 +50,9 @@
 
   const isBlank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0);
 
+  /** The answer's value. Photo questions keep their pictures in ans.photos, so that IS their value. */
+  const valueOf = (q, ans) => (q.type === 'photo' ? (ans && ans.photos) || [] : ans && ans.value);
+
   /** Should this question be shown given current answers? */
   function isVisible(q, checklist, answers) {
     const s = q.showIf;
@@ -62,7 +65,7 @@
     switch (s.op) {
       case 'fail': return res.status === 'fail';
       case 'pass': return res.status === 'pass';
-      case 'answered': return !isBlank(a.value) || a.na === true;
+      case 'answered': return !isBlank(valueOf(src, a)) || a.na === true;
       case 'neq': return String(a.value) !== String(s.value);
       case 'eq':
       default:
@@ -81,7 +84,7 @@
     const out = { status: 'blank', earned: 0, max: 0 };
     if (q.type === 'section') return { status: 'info', earned: 0, max: 0 };
     if (ans.na) return { status: 'na', earned: 0, max: 0 };
-    const v = ans.value;
+    const v = valueOf(q, ans);
     if (isBlank(v)) return out; // unanswered: excluded from score until answered
     const full = (status, frac = 1) => ({ status, earned: pts * frac, max: pts });
     const info = () => (pts > 0 ? full('pass') : { status: 'info', earned: 0, max: 0 });
@@ -201,5 +204,5 @@
     return true;
   }
 
-  return { TYPES, uid, scheduledOn, newQuestion, isBlank, isVisible, evaluate, needs, score, validate };
+  return { TYPES, uid, scheduledOn, valueOf, newQuestion, isBlank, isVisible, evaluate, needs, score, validate };
 });
