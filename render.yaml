@@ -1,0 +1,22 @@
+# Render Blueprint: Render dashboard > New > Blueprint > pick this repo.
+# Free hosts wipe their disk on restart, so production data lives in Firebase.
+services:
+  - type: web
+    name: kitchen-audit
+    runtime: node
+    plan: free
+    branch: claude/pensive-noether-m67ble # change to main once merged
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STORAGE
+        value: firebase
+      # Paste the whole service-account JSON (Firebase > Project settings > Service accounts)
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      # Optional: FIREBASE_STORAGE_BUCKET (needs Firebase's paid Blaze plan).
+      # Without it, photos are stored in Firestore and everything runs on the free Spark plan.

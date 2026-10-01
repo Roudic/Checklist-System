@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/run.js && node test/api.js"
+    "test": "node test/run.js && node test/firebase.js && node test/api.js && TEST_STORAGE=firebase node test/api.js"
   },
   "engines": {
     "node": ">=18"

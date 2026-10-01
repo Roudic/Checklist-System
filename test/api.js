@@ -6,7 +6,11 @@ const fs = require('fs'), os = require('os'), path = require('path');
 const PORT = 3900 + Math.floor(Math.random() * 90);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-test-'));
 const base = `http://localhost:${PORT}/api`;
-const srv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT, DATA_DIR: dir, STORAGE: 'file' }, stdio: 'pipe' });
+// TEST_STORAGE=firebase runs the same tests against the fake Firestore
+const fb = process.env.TEST_STORAGE === 'firebase';
+const srv = spawn(process.execPath, [...(fb ? ['-r', path.join(__dirname, 'fake-firebase-admin.js')] : []), path.join(__dirname, '..', 'server.js')],
+  { env: { ...process.env, PORT, DATA_DIR: dir, STORAGE: fb ? 'firebase' : 'file', FIREBASE_SERVICE_ACCOUNT: fb ? '{}' : '' }, stdio: 'pipe' });
+srv.stderr.on('data', (d) => process.stderr.write(d));
 
 function client() {
   let cookie = '';
@@ -94,5 +98,5 @@ let n = 0; const t = async (name, fn) => { await fn(); n++; console.log('ok -', 
     await staff('POST', '/auth/logout');
     assert.equal((await staff('GET', '/checklists')).status, 401);
   });
-  console.log(`\n${n} API tests passed`);
+  console.log(`\n${n} API tests passed (${fb ? 'firebase' : 'file'} storage)`);
 })().catch((e) => { console.error('FAIL', e); process.exitCode = 1; }).finally(() => { srv.kill(); fs.rmSync(dir, { recursive: true, force: true }); });

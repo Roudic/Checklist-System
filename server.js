@@ -7,6 +7,8 @@ const createStore = require('./storage');
 try { for (const l of fs.readFileSync('.env', 'utf8').split('\n')) { const m = /^([A-Z_]+)=(.*)$/.exec(l.trim()); if (m && !(m[1] in process.env)) process.env[m[1]] = m[2]; } } catch {}
 
 const PORT = process.env.PORT || 3000;
+if ((process.env.NODE_ENV === 'production' || process.env.VERCEL) && (process.env.STORAGE || 'file') === 'file')
+  console.warn('\n⚠️  WARNING: running in production with STORAGE=file. Most hosts wipe the disk on restart, so data WILL be lost. Set STORAGE=firebase.\n');
 const PUBLIC = path.join(__dirname, 'public');
 const store = createStore(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
@@ -17,6 +19,12 @@ const send = (res, code, body) => {
   res.end(JSON.stringify(body));
 };
 const readBody = (req) => new Promise((ok, no) => {
+  // Vercel's runtime may have parsed the body already; plain Node leaves req.body undefined
+  if (req.body !== undefined) {
+    const v = req.body;
+    try { return ok(Buffer.isBuffer(v) ? JSON.parse(v.toString() || '{}') : typeof v === 'string' ? JSON.parse(v || '{}') : v || {}); }
+    catch { return no(new Error('Bad JSON')); }
+  }
   let b = '', n = 0;
   req.on('data', (c) => { n += c.length; if (n > 25e6) { no(new Error('Body too large')); req.destroy(); } else b += c; });
   req.on('end', () => { try { ok(b ? JSON.parse(b) : {}); } catch { no(new Error('Bad JSON')); } });
@@ -33,12 +41,12 @@ const pinOk = (u, pin) => {
 const validPin = (pin) => /^\d{4,8}$/.test(String(pin || ''));
 const publicUser = (u) => u && { id: u.id, name: u.name, role: u.role, active: u.active !== false, createdAt: u.createdAt };
 const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map((c) => c.trim().split('=')).filter((x) => x[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
-const sessionCache = new Map(); // token -> { userId, expires }
 async function currentUser(req) {
   const tok = cookies(req).sid;
   if (!tok || !/^[a-f0-9]{48}$/.test(tok)) return null;
-  let sess = sessionCache.get(tok);
-  if (!sess) { sess = await store.get('sessions', tok); if (sess) sessionCache.set(tok, sess); }
+  // always read from the store: on serverless hosts many instances run at once, and a
+  // per-instance cache would keep logged-out or deactivated sessions alive
+  const sess = await store.get('sessions', tok);
   if (!sess || sess.expires < now()) return null;
   const u = await store.get('users', sess.userId);
   return u && u.active !== false ? u : null;
@@ -46,11 +54,11 @@ async function currentUser(req) {
 async function startSession(res, req, user) {
   const tok = crypto.randomBytes(24).toString('hex');
   const sess = { id: tok, userId: user.id, expires: new Date(Date.now() + SESSION_DAYS * 864e5).toISOString() };
-  await store.put('sessions', tok, sess); sessionCache.set(tok, sess);
+  await store.put('sessions', tok, sess);
   const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
   res.setHeader('Set-Cookie', `sid=${tok}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_DAYS * 86400}${secure}`);
 }
-const loginFails = new Map(); // userId -> { n, until }
+const RAW = Symbol('raw'); // route already wrote the response
 const httpError = (code, error) => Object.assign(new Error(error), { code });
 // managers manage staff; only admins touch managers/admins
 const canManage = (actor, role) => actor.role === 'admin' || (actor.role === 'manager' && role === 'staff');
@@ -230,6 +238,12 @@ route('GET', '/api/tv', async (r) => {
       states: Object.fromEntries(Object.entries(S.score(x.checklist, x.answers).items).map(([k, v]) => [k, v.status])) })),
     actions: actions.filter((a) => a.status === 'open') };
 }, 'public');
+route('GET', '/api/media/([\\w-]+)', async (r, b, [id]) => {
+  const f = await store.getFile(id); if (!f) return 404;
+  r.res.writeHead(200, { 'Content-Type': f.type, 'Cache-Control': 'private, max-age=31536000, immutable' });
+  r.res.end(f.data);
+  return RAW;
+});
 route('GET', '/api/health', async () => ({ ok: true, storage: store.kind }), 'public');
 
 // ---- auth routes
@@ -253,20 +267,20 @@ route('POST', '/api/auth/setup', async (r, b) => {
 route('POST', '/api/auth/login', async (r, b) => {
   const u = await store.get('users', String(b.userId || ''));
   if (!u || u.active === false) throw httpError(401, 'Wrong name or PIN');
-  const f = loginFails.get(u.id);
+  const f = await store.get('lockouts', u.id); // stored, so it holds across server instances
   if (f && f.until > Date.now()) throw httpError(429, `Too many tries. Wait ${Math.ceil((f.until - Date.now()) / 60000)} min.`);
   if (!pinOk(u, b.pin)) {
     const n = (f && f.until <= Date.now() && f.until ? 0 : (f ? f.n : 0)) + 1;
-    loginFails.set(u.id, { n, until: n >= 5 ? Date.now() + 5 * 60000 : 0 });
+    await store.put('lockouts', u.id, { id: u.id, n, until: n >= 5 ? Date.now() + 5 * 60000 : 0 });
     throw httpError(401, n >= 5 ? 'Too many tries. Locked for 5 min.' : 'Wrong PIN');
   }
-  loginFails.delete(u.id);
+  if (f) await store.del('lockouts', u.id);
   await startSession(r.res, r.req, u);
   return { user: publicUser(u) };
 }, 'public');
 route('POST', '/api/auth/logout', async (r) => {
   const tok = cookies(r.req).sid;
-  if (tok) { sessionCache.delete(tok); await store.del('sessions', tok).catch(() => {}); }
+  if (tok) await store.del('sessions', tok).catch(() => {});
   r.res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
   return { ok: true };
 }, 'public');
@@ -302,14 +316,18 @@ route('PUT', '/api/users/([\\w-]+)', async (r, b, [id]) => {
   }
   await store.put('users', id, next);
   if (!next.active) { // kill their sessions
-    for (const s of await store.list('sessions')) if (s.userId === id) { sessionCache.delete(s.id); await store.del('sessions', s.id); }
+    for (const s of await store.list('sessions')) if (s.userId === id) await store.del('sessions', s.id);
   }
   return publicUser(next);
 }, 'staff');
 
-const server = http.createServer(async (req, res) => {
+let ready;
+const init = () => (ready = ready || seed().then(cleanSessions));
+
+async function handler(req, res) {
   const url = new URL(req.url, 'http://x');
   try {
+    await init();
     if (url.pathname.startsWith('/api/')) {
       for (const [m, re, fn, role] of routes) {
         const mt = m === req.method && re.exec(url.pathname);
@@ -321,6 +339,7 @@ const server = http.createServer(async (req, res) => {
         }
         const body = ['POST', 'PUT'].includes(req.method) ? await readBody(req) : {};
         const out = await fn({ query: Object.fromEntries(url.searchParams), user, req, res }, body, mt.slice(1));
+        if (out === RAW) return;
         if (out === 404) return send(res, 404, { error: 'Not found' });
         if (out && out.error) return send(res, 400, out);
         return send(res, 200, out);
@@ -339,10 +358,12 @@ const server = http.createServer(async (req, res) => {
     if (e.code && e.code >= 400 && e.code < 500) return send(res, e.code, { error: e.message });
     console.error(e); send(res, 500, { error: e.message });
   }
-});
+}
 
 async function cleanSessions() {
   for (const x of await store.list('sessions')) if (x.expires < now()) await store.del('sessions', x.id);
 }
 
-seed().then(cleanSessions).then(() => server.listen(PORT, () => console.log(`Checklist System on http://localhost:${PORT}  (storage: ${store.kind})  TV: /tv`)));
+module.exports = handler; // used by Vercel (api/[...path].js)
+if (require.main === module)
+  init().then(() => http.createServer(handler).listen(PORT, () => console.log(`Checklist System on http://localhost:${PORT}  (storage: ${store.kind})  TV: /tv`)));
