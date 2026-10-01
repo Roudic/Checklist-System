@@ -57,5 +57,8 @@ Either way: open the site, create the owner account, then copy the TV link from 
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the test suite on every push and PR.
 
+## Design
+Self-hosted, no CDN needed (works on a TV with a flaky connection): [Inter](https://rsms.me/inter/) font (`public/fonts`, SIL OFL) and [Lucide](https://lucide.dev) icons (`public/icons.svg`, ISC). Licenses are in `public/licenses/`. Colors and spacing are CSS variables at the top of `public/styles.css`, so changing `--brand` re-themes the app. Light and dark mode follow the device setting.
+
 ## Roadmap ideas
 Reminders/notifications for overdue checklists, multi-location filtering, CSV/PDF export, per-screen TV configs.

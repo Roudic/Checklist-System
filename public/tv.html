@@ -1,12 +1,16 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" href="data:,">
+<link rel="icon" href="data:,"><link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <title>Kitchen Board</title><link rel="stylesheet" href="tv.css"></head>
 <body>
-<header><div id="title">Kitchen Board</div><div id="clock"></div></header>
+<header>
+  <div class="brandbar"><span class="mark"><svg class="ic"><use href="/icons.svg#chef-hat"/></svg></span><div><div id="title">Kitchen Board</div><div class="live"><i></i>Live</div></div></div>
+  <div id="pager"></div>
+  <div id="clock"></div>
+</header>
 <section id="stage"></section>
 <div id="ticker"></div>
 <div id="progress"><i></i></div>
-<div id="hint">← → skip · Space pause · F fullscreen</div>
+<div id="hint">← → change slide · Space pause · F full screen</div>
 <script src="shared.js"></script><script src="tv.js"></script>
 </body></html>
